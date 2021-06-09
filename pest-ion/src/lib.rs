@@ -50,6 +50,7 @@ use ion_rs::value::{Builder, Element};
 use pest::Parser;
 use pest_meta::ast::{Expr, Rule as AstRule, RuleType as AstRuleType, RuleType};
 use pest_meta::parser::{consume_rules, PestParser, Rule};
+use smallvec::{smallvec, SmallVec};
 use std::fs::read_to_string;
 use std::path::Path;
 
@@ -182,73 +183,74 @@ impl PestToElement for Expr {
     fn pest_to_element(&self) -> Self::Element {
         use OwnedValue::*;
 
-        let values = match self.clone() {
-            Expr::Str(text) => vec![
+        const STACK_SIZE: usize = 4;
+        let values: SmallVec<[_; STACK_SIZE]> = match self.clone() {
+            Expr::Str(text) => smallvec![
                 text_token("string").into(),
                 text_token("exact").into(),
                 String(text).into(),
             ],
-            Expr::Insens(text) => vec![
+            Expr::Insens(text) => smallvec![
                 text_token("string").into(),
                 text_token("insensitive").into(),
                 String(text).into(),
             ],
-            Expr::Range(begin, end) => vec![
+            Expr::Range(begin, end) => smallvec![
                 text_token("character_range").into(),
                 String(begin).into(),
                 String(end).into(),
             ],
-            Expr::Ident(name) => vec![text_token("identifier").into(), String(name).into()],
-            Expr::PosPred(expr) => vec![
+            Expr::Ident(name) => smallvec![text_token("identifier").into(), String(name).into()],
+            Expr::PosPred(expr) => smallvec![
                 text_token("predicate").into(),
                 text_token("positive").into(),
                 expr.pest_to_element(),
             ],
-            Expr::NegPred(expr) => vec![
+            Expr::NegPred(expr) => smallvec![
                 text_token("predicate").into(),
                 text_token("negative").into(),
                 expr.pest_to_element(),
             ],
-            Expr::Seq(left, right) => vec![
+            Expr::Seq(left, right) => smallvec![
                 text_token("sequence").into(),
                 left.pest_to_element(),
                 right.pest_to_element(),
             ],
-            Expr::Choice(left, right) => vec![
+            Expr::Choice(left, right) => smallvec![
                 text_token("choice").into(),
                 left.pest_to_element(),
                 right.pest_to_element(),
             ],
             Expr::Opt(expr) => {
-                vec![text_token("optional").into(), expr.pest_to_element()]
+                smallvec![text_token("optional").into(), expr.pest_to_element()]
             }
-            Expr::Rep(expr) => vec![
+            Expr::Rep(expr) => smallvec![
                 text_token("repeat_min").into(),
                 0.into(),
                 expr.pest_to_element(),
             ],
-            Expr::RepOnce(expr) => vec![
+            Expr::RepOnce(expr) => smallvec![
                 text_token("repeat_min").into(),
                 1.into(),
                 expr.pest_to_element(),
             ],
-            Expr::RepMin(expr, min) => vec![
+            Expr::RepMin(expr, min) => smallvec![
                 text_token("repeat_min").into(),
                 (min as i64).into(),
                 expr.pest_to_element(),
             ],
-            Expr::RepMax(expr, max) => vec![
+            Expr::RepMax(expr, max) => smallvec![
                 text_token("repeat_max").into(),
                 (max as i64).into(),
                 expr.pest_to_element(),
             ],
-            Expr::RepExact(expr, exact) => vec![
+            Expr::RepExact(expr, exact) => smallvec![
                 text_token("repeat_range").into(),
                 (exact as i64).into(),
                 (exact as i64).into(),
                 expr.pest_to_element(),
             ],
-            Expr::RepMinMax(expr, min, max) => vec![
+            Expr::RepMinMax(expr, min, max) => smallvec![
                 text_token("repeat_range").into(),
                 (min as i64).into(),
                 (max as i64).into(),
@@ -259,6 +261,7 @@ impl PestToElement for Expr {
             Expr::Push(_) => unimplemented!(),
             Expr::PeekSlice(_, _) => unimplemented!(),
         };
+        assert!(values.len() <= STACK_SIZE);
 
         let element = Self::Element::new_sexp(values);
 
@@ -495,7 +498,6 @@ mod tests {
     }
 
     /// Simple test case to make sure we can convert the PartiQL grammar
-    #[test]
     fn convert_partiql() -> PestToIonResult<()> {
         let grammar_path = Path::new("../partiql-parser/src/peg/partiql.pest");
         let grammar_element = grammar_path.try_pest_to_element()?;
@@ -513,5 +515,29 @@ mod tests {
         assert!(grammar_struct.get("Scanner").is_some());
 
         Ok(())
+    }
+
+    /// Wraps testing the PartiQL grammar into a thread to expand the stack size!
+    #[test]
+    fn spawn_convert_partiql() {
+        // NB that for stack size <= 4MB, PartiQL's grammar which has large nested expressions
+        // for things like the keyword list will overflow the stack (using `smallvec` exacerbates
+        // things quite a bit) so we create a stack and spawn a thread with a large stack to
+        // avoid this problem
+        const STACK_SIZE: usize = 16 * 1024 * 1024;
+        let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
+
+        let handle = builder
+            .name("convert_partiql".into())
+            .spawn(|| {
+                if let Err(e) = convert_partiql() {
+                    panic!("Could not parse PartiQL Grammar; {}", e);
+                }
+            })
+            .expect("Spawn failed");
+
+        if let Err(e) = handle.join() {
+            panic!("Thread failed; {:?}", e);
+        }
     }
 }
